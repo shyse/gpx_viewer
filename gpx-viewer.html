@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPXファイル表示</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.min.js"></script>
+  <style>
+    body {
+      font-family: 'Arial', sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+
+    #map {
+      width: 100%;
+      height: 80vh; /* 地図の高さ */
+    }
+
+    .controls {
+      display: flex;
+      justify-content: center;
+      padding: 10px;
+      background: #f4f4f4;
+      box-shadow: 0px -2px 5px rgba(0, 0, 0, 0.2);
+    }
+
+    .controls input[type="file"], .controls button, .controls select, .controls input[type="range"] {
+      margin: 10px;
+      padding: 10px;
+      font-size: 14px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+    }
+
+    .controls button {
+      background: #007bff;
+      color: white;
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+
+    .controls button.active {
+      background: #0056b3;
+    }
+
+    .overlay {
+      position: absolute;
+      top: 15vh; /* 地図の下に配置 */
+      left: 60px;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 12px; /* 情報欄内のパディングを減少 */
+      border-radius: 8px;
+      box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.2);
+      font-size: 14px;
+      z-index: 1000;
+      cursor: grab;
+      width: 250px;
+      transition: height 0.3s ease;
+    }
+
+    .overlay.dragging {
+      cursor: grabbing;
+    }
+
+    .overlay .info-content {
+      transition: opacity 0.3s ease, height 0.3s ease;
+    }
+
+    .overlay.collapsed .info-content {
+      height: 0;
+      opacity: 0;
+      visibility: hidden;
+    }
+
+    /* 情報欄の各項目の隙間を縮小 */
+    .overlay .info-content p {
+      margin: 5px 0; /* 上下のマージンを縮小 */
+      padding: 0;   /* パディングを削除 */
+    }
+
+    .overlay .toggle-collapse {
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      font-size: 18px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <input type="file" id="gpxFile" accept=".gpx" />
+    <button id="playBtn">再生</button>
+    <button id="pauseBtn" disabled>一時停止</button>
+    <input type="range" id="seekBar" min="0" max="100" value="0" />
+    <select id="speedSelector">
+      <option value="1">標準</option>
+      <option value="2">2倍速</option>
+      <option value="4">4倍速</option>
+      <option value="8">8倍速</option>
+      <option value="16">16倍速</option>
+      <option value="32">32倍速</option>
+      <option value="64">64倍速</option>
+    </select>
+  </div>
+  <div id="map"></div>
+  <div class="overlay" id="info">
+    <span class="toggle-collapse" id="toggleCollapse">▽</span>
+    <div class="info-content">
+      <p><strong>日時:</strong> <span id="time">--:--:--</span></p>
+      <p><strong>緯度:</strong> <span id="lat">--</span></p>
+      <p><strong>経度:</strong> <span id="lng">--</span></p>
+      <p><strong>高度:</strong> <span id="altitude">--</span> m</p>
+      <p><strong>速度:</strong> <span id="speed">--</span> km/h</p>
+      <p><strong>移動距離:</strong> <span id="distance">--</span> km</p>
+      <p><strong>経過時間:</strong> <span id="elapsedTime">--:--:--</span></p>
+    </div>
+  </div>
+
+  <script>
+    // 地図の設定
+    const map = L.map('map').setView([35.6895, 139.6917], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    let gpxLayer = null;
+    let points = [];  // GPXデータの各ポイント
+    let playbackInterval = null;  // 再生用のインターバル
+    let currentIndex = 0;  // 現在のインデックス
+    let currentMarker = null;  // 現在位置のマーカー
+    let pastPolyline = null;  // 過去の移動経路
+    let speedMultiplier = 1;  // 再生速度
+    let totalDistance = 0;  // 総距離
+    let startTime = null;  // 開始時刻
+    let isPlaying = false;  // 再生中かどうか
+
+    // 情報欄の各項目への参照
+    const infoTime = document.getElementById('time');
+    const infoLat = document.getElementById('lat');
+    const infoLng = document.getElementById('lng');
+    const infoAltitude = document.getElementById('altitude');
+    const infoSpeed = document.getElementById('speed');
+    const infoDistance = document.getElementById('distance');
+    const infoElapsedTime = document.getElementById('elapsedTime');
+    const seekBar = document.getElementById('seekBar');
+    const playBtn = document.getElementById('playBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const speedSelector = document.getElementById('speedSelector');
+    const infoOverlay = document.getElementById('info');
+    const toggleCollapse = document.getElementById('toggleCollapse');
+
+    // GPXファイルが選択されたときの処理
+    document.getElementById('gpxFile').addEventListener('change', function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const parser = new DOMParser();
+        const gpx = parser.parseFromString(e.target.result, "application/xml");
+        const geojson = toGeoJSON.gpx(gpx);
+
+        if (gpxLayer) map.removeLayer(gpxLayer);
+        if (pastPolyline) map.removeLayer(pastPolyline);
+        if (currentMarker) map.removeLayer(currentMarker);
+
+        // GPXデータをGeoJSONとして地図に追加
+        gpxLayer = L.geoJSON(geojson, {
+          style: {
+            color: 'blue',
+            weight: 3
+          }
+        }).addTo(map);
+
+        map.fitBounds(gpxLayer.getBounds());
+
+        // GPXデータをポイント配列に変換
+        points = geojson.features[0].geometry.coordinates.map((coord, index, arr) => {
+          const time = new Date(geojson.features[0].properties.coordTimes[index]);
+          const altitude = coord[2]; // 高度
+          const prev = arr[index - 1];
+          const distance = prev
+            ? L.latLng(coord[1], coord[0]).distanceTo(L.latLng(prev[1], prev[0]))
+            : 0;
+
+          totalDistance += distance;
+
+          return {
+            lat: coord[1],
+            lng: coord[0],
+            altitude: altitude,
+            time: time,
+            speed: (distance / 1000) * 3600, // km/hに変換
+            distance: totalDistance / 1000, // kmに変換
+          };
+        });
+
+        startTime = points[0]?.time || null;
+
+        // シークバーの最大値を設定
+        seekBar.max = points.length - 1;
+        currentIndex = 0;
+        updateOverlay(0);  // 初期状態の情報欄更新
+      };
+      reader.readAsText(file);
+    });
+
+    // 再生を開始する関数
+    function startPlayback() {
+      if (playbackInterval) clearInterval(playbackInterval);
+      playbackInterval = setInterval(() => {
+        if (currentIndex >= points.length - 1) {
+          clearInterval(playbackInterval);
+          isPlaying = false;
+          playBtn.classList.remove('active');
+          pauseBtn.disabled = true;
+          return;
+        }
+        updateOverlay(++currentIndex);  // インデックスを進めて情報欄更新
+        seekBar.value = currentIndex;
+      }, 1000 / speedMultiplier);
+      isPlaying = true;
+    }
+
+    // 再生を一時停止する関数
+    function pausePlayback() {
+      if (playbackInterval) clearInterval(playbackInterval);
+      playbackInterval = null;
+      isPlaying = false;
+    }
+
+    // 情報欄を更新する関数
+    function updateOverlay(index) {
+      if (currentMarker) map.removeLayer(currentMarker);
+      if (pastPolyline) map.removeLayer(pastPolyline);
+
+      const point = points[index];
+      const pastCoords = points.slice(0, index + 1).map(p => [p.lat, p.lng]);
+
+      // 現在位置のマーカーを地図に追加
+      currentMarker = L.circleMarker([point.lat, point.lng], {
+        radius: 8,
+        color: 'red',
+        fillColor: 'red',
+        fillOpacity: 1
+      }).addTo(map);
+
+      // 過去の経路を地図に描画
+      pastPolyline = L.polyline(pastCoords, {
+        color: 'green',
+        weight: 3
+      }).addTo(map);
+
+      // 情報欄の各項目を更新
+      infoTime.textContent = point.time.toLocaleString('ja-JP');
+      infoLat.textContent = point.lat.toFixed(6);
+      infoLng.textContent = point.lng.toFixed(6);
+      infoAltitude.textContent = point.altitude.toFixed(2);
+      infoSpeed.textContent = point.speed.toFixed(1);
+      infoDistance.textContent = point.distance.toFixed(2);
+
+      // 経過時間の表示
+      const elapsedTime = point.time - startTime;
+      const elapsedHours = Math.floor(elapsedTime / (1000 * 60 * 60));
+      const elapsedMinutes = Math.floor((elapsedTime % (1000 * 60 * 60)) / (1000 * 60));
+      const elapsedSeconds = Math.floor((elapsedTime % (1000 * 60)) / 1000);
+
+      infoElapsedTime.textContent = `${elapsedHours.toString().padStart(2, '0')}:${elapsedMinutes.toString().padStart(2, '0')}:${elapsedSeconds.toString().padStart(2, '0')}`;
+    }
+
+    // 再生ボタンが押されたときの処理
+    playBtn.addEventListener('click', function () {
+      if (!points.length) return;
+      if (!isPlaying) {
+        playBtn.classList.add('active');
+        pauseBtn.classList.remove('active');
+        pauseBtn.disabled = false;
+        startPlayback();
+      }
+    });
+
+    // 一時停止ボタンが押されたときの処理
+    pauseBtn.addEventListener('click', function () {
+      pausePlayback();
+      playBtn.classList.remove('active');
+      pauseBtn.classList.add('active');
+    });
+
+    // シークバーが変更されたときの処理
+    seekBar.addEventListener('input', function () {
+      currentIndex = parseInt(seekBar.value);
+      updateOverlay(currentIndex);
+
+      if (isPlaying) {
+        pausePlayback();
+        startPlayback();
+      }
+    });
+
+    // 再生速度が変更されたときの処理
+    speedSelector.addEventListener('change', function () {
+      speedMultiplier = parseInt(speedSelector.value);
+      if (isPlaying) startPlayback();
+    });
+
+    // 折り畳みボタンの動作
+    toggleCollapse.addEventListener('click', function () {
+      infoOverlay.classList.toggle('collapsed');
+      toggleCollapse.textContent = infoOverlay.classList.contains('collapsed') ? '△' : '▽';
+    });
+
+    let isDragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    // 情報欄をドラッグ可能にする
+    infoOverlay.addEventListener('mousedown', function (e) {
+      isDragging = true;
+      offsetX = e.clientX - infoOverlay.getBoundingClientRect().left;
+      offsetY = e.clientY - infoOverlay.getBoundingClientRect().top;
+      infoOverlay.classList.add('dragging');
+    });
+
+    document.addEventListener('mousemove', function (e) {
+      if (isDragging) {
+        infoOverlay.style.left = e.clientX - offsetX + 'px';
+        infoOverlay.style.top = e.clientY - offsetY + 'px';
+      }
+    });
+
+    document.addEventListener('mouseup', function () {
+      isDragging = false;
+      infoOverlay.classList.remove('dragging');
+    });
+  </script>
+</body>
+</html>
