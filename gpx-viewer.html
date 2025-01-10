@@ -17,6 +17,7 @@
     #map {
       width: 100%;
       height: 80vh; /* 地図の高さ */
+      cursor: crosshair; /* マウスポインタのスタイルを変更 */
     }
 
     .controls {
@@ -161,6 +162,24 @@
 
       const reader = new FileReader();
       reader.onload = function(e) {
+        // 初期化処理
+        if (playbackInterval) clearInterval(playbackInterval);
+        currentIndex = 0;
+        totalDistance = 0;
+        startTime = null;
+        isPlaying = false;
+        playBtn.classList.remove('active');
+        pauseBtn.classList.remove('active');
+        pauseBtn.disabled = true;
+        seekBar.value = 0;
+        infoTime.textContent = '--:--:--';
+        infoLat.textContent = '--';
+        infoLng.textContent = '--';
+        infoAltitude.textContent = '--';
+        infoSpeed.textContent = '--';
+        infoDistance.textContent = '--';
+        infoElapsedTime.textContent = '--:--:--';
+
         const parser = new DOMParser();
         const gpx = parser.parseFromString(e.target.result, "application/xml");
         const geojson = toGeoJSON.gpx(gpx);
@@ -244,10 +263,11 @@
 
       // 現在位置のマーカーを地図に追加
       currentMarker = L.circleMarker([point.lat, point.lng], {
-        radius: 8,
+        radius: 10, // アイコンのサイズを大きく
         color: 'red',
-        fillColor: 'red',
-        fillOpacity: 1
+        fillColor: 'yellow', // アイコンの塗りつぶし色を変更
+        fillOpacity: 1,
+        weight: 2 // アイコンの枠線の太さを変更
       }).addTo(map);
 
       // 過去の経路を地図に描画
